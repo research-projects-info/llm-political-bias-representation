@@ -1,0 +1,354 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import pandas as pd
+from tqdm import tqdm
+import os
+import json
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import brier_score_loss, accuracy_score
+from sklearn.metrics import accuracy_score, brier_score_loss, precision_score, recall_score, f1_score, confusion_matrix
+from sklearn.metrics import roc_auc_score, roc_curve
+import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
+
+
+# === Configuration for the classifier=========
+TOP_K = 20
+EPOCHS = 10
+#EPOCHS = 30
+BATCH_SIZE = 32
+LR = 5e-4
+#LR = 1e-4
+DROPOUT = 0.1
+#DROPOUT = 0.3
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# ========== Residual Stream Extraction ==========
+#Without system prompt
+def extract_residuals(prompts, model, layer_range):
+    all_reps = []
+    for prompt in tqdm(prompts, desc="Extracting residuals"):
+        inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+        with torch.no_grad():
+            outputs = model(**inputs)
+        hidden_states = outputs.hidden_states
+        reps = [hidden_states[l][0].mean(dim=0).float().cpu() for l in layer_range]
+        all_reps.append(torch.stack(reps))  # [num_selected_layers, dim]
+    return torch.stack(all_reps)  # [num_samples, num_layers_selected, dim]
+
+#Using a system prompt
+# def extract_residuals(prompts, model, layer_range):
+#     system_prompt = (
+#         "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n"
+#         "You are a language model trained to analyze political statements and opinions/score. "
+#         "Your task is to interpret a given statement paired with an expressed opinion or score and internally infer "
+#         "which political party is most aligned with that viewpoint. You should not state or guess the party name explicitly "
+#         "but process the input in a way that reflects the ideological cues associated with political alignment.\n"
+#         "<|eot_id|>"
+#     )
+
+#     all_reps = []
+#     for user_prompt in tqdm(prompts, desc="Extracting residuals"):
+#         full_prompt = (
+#             f"{system_prompt}"
+#             f"<|start_header_id|>user<|end_header_id|>\n{user_prompt}\n<|eot_id|>"
+#             f"<|start_header_id|>assistant<|end_header_id|>\n"
+#         )
+#         inputs = tokenizer(full_prompt, return_tensors="pt").to(DEVICE)
+#         with torch.no_grad():
+#             outputs = model(**inputs)
+#         hidden_states = outputs.hidden_states
+#         reps = [hidden_states[l][0].mean(dim=0).float().cpu() for l in layer_range]
+#         all_reps.append(torch.stack(reps))  # [num_selected_layers, dim]
+#     return torch.stack(all_reps)  # [num_samples, num_layers_selected, dim]
+
+#=========================== Evaluate the Classifier performance===============
+
+def evaluate_probe(probe, X_val, y_val, party, output_dir, bins=10):
+    probe.eval()
+    with torch.no_grad():
+        logits = probe(X_val.to(DEVICE)).cpu()
+        probs = torch.sigmoid(logits)
+        labels = y_val.cpu()
+
+    # Predictions
+    preds = (probs > 0.5).int()
+
+    # Metrics
+    acc = accuracy_score(labels, preds)
+    brier = float(brier_score_loss(labels, probs))
+    precision = precision_score(labels, preds, zero_division=0)
+    recall = recall_score(labels, preds, zero_division=0)
+    f1 = f1_score(labels, preds, zero_division=0)
+    cm = confusion_matrix(labels, preds).tolist()
+
+    # ROC and AUC
+    try:
+        auc = roc_auc_score(labels, probs)
+        fpr, tpr, _ = roc_curve(labels, probs)
+
+        plt.figure()
+        plt.plot(fpr, tpr, label=f"ROC curve (AUC = {auc:.2f})")
+        plt.plot([0, 1], [0, 1], 'k--')
+        plt.xlabel("False Positive Rate")
+        plt.ylabel("True Positive Rate")
+        plt.title(f"ROC Curve - {party}")
+        plt.legend(loc="lower right")
+
+        # Save ROC figure
+        roc_path = os.path.join(output_dir, f"roc_curve_{party}.png")
+        plt.savefig(roc_path)
+        plt.close()
+        print(f"ROC curve saved to {roc_path}")
+    except ValueError as e:
+        print(f"Could not compute ROC curve for {party}: {e}")
+        auc = None
+
+    # Print metrics
+    print(f"\nEvaluation for {party}:")
+    print(f"Accuracy     : {acc:.3f}")
+    print(f"Brier Score  : {brier:.3f}")
+    print(f"Precision    : {precision:.3f}")
+    print(f"Recall       : {recall:.3f}")
+    print(f"F1-Score     : {f1:.3f}")
+    print(f"AUC          : {auc if auc is not None else 'N/A'}")
+    print("Confusion Matrix:")
+    print(cm)
+
+    # Save to file
+    os.makedirs(output_dir, exist_ok=True)
+    metrics_path = os.path.join(output_dir, f"metrics_{party}.json")
+    metrics = {
+        "party": party,
+        "accuracy": acc,
+        "brier_score": brier,
+        "precision": precision,
+        "recall": recall,
+        "f1_score": f1,
+        "auc": auc,
+        "confusion_matrix": cm
+    }
+
+    with open(metrics_path, "w") as f:
+        json.dump(metrics, f, indent=4)
+
+    print(f"Metrics saved to {metrics_path}")
+
+
+
+
+# ========== Dataset and Probe Definition ==========
+class ProbeDataset(Dataset):
+    def __init__(self, residuals, labels):
+        self.residuals = residuals
+        self.labels = labels
+    
+    def __len__(self):
+        return len(self.labels)
+    
+    def __getitem__(self, idx):
+        return self.residuals[idx], self.labels[idx]
+
+class Probe(nn.Module):
+    def __init__(self, dim, dropout=DROPOUT):
+        super().__init__()
+        self.linear = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(dim, 1)
+        )
+    
+    def forward(self, x):
+        return self.linear(x).squeeze(-1)
+
+def train_probe(X, y, epochs=EPOCHS, lr=LR):
+    dataset = ProbeDataset(X, y)
+    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+    probe = Probe(X.shape[-1]).to(DEVICE)
+    optimizer = torch.optim.Adam(probe.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs * len(loader))
+
+    pos_weight = torch.tensor((len(y) - y.sum()) / y.sum()).to(DEVICE)
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+    probe.train()
+    for _ in range(epochs):
+        for xb, yb in loader:
+            xb, yb = xb.to(DEVICE), yb.float().to(DEVICE)
+            pred = probe(xb)
+            loss = criterion(pred, yb)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+    
+    return probe
+
+# ======================== Value Vector Extraction ========================
+def cosine_similarity(a, b):
+    return F.cosine_similarity(a.unsqueeze(0), b.unsqueeze(0)).item()
+
+def get_top_value_vectors(probe, num_layers,model, top_k=TOP_K):
+    probe_weight = probe.linear[1].weight.detach().squeeze(0).cpu()
+    results = []
+
+    for layer in range(num_layers):
+        mlp = model.model.layers[layer].mlp
+        value_matrix = mlp.down_proj.weight.detach().cpu().T  # [hidden_dim, dim]
+        
+        print("probe_weight shape:", probe_weight.shape)
+        print("example value_vector shape:", value_matrix[0].shape)
+
+        sims = [cosine_similarity(probe_weight, v) for v in value_matrix]
+        top_indices = sorted(range(len(sims)), key=lambda i: sims[i], reverse=True)[:top_k]
+        
+        for i in top_indices:
+            results.append({
+                "layer": layer,
+                "neuron_index": i,
+                "cosine_similarity": sims[i],
+                "value_vector": value_matrix[i]  # Tensor
+            })
+    
+    return results
+
+
+# ========== Configuration for the LLM models and datasets ==========
+
+#All models from the paper 
+#meta-llama/Llama-3.1-8B-Instruct,
+#meta-llama/Llama-3.1-8B,
+#meta-llama/Meta-Llama-3-8B-Instruct,
+#meta-llama/Meta-Llama-3-8B,
+#meta-llama/Llama-3.2-3B-Instruct,
+#meta-llama/Llama-3.2-3B,
+#meta-llama/Llama-2-7b-hf,
+#meta-llama/Llama-2-7b-chat-hf,
+#mistralai/Mistral-7B-Instruct-v0.1,
+#google/gemma-7b-it,
+#google/gemma-7b,
+#Qwen/Qwen2.5-7B,
+#Qwen/Qwen2.5-7B-Instruct
+
+# List of models
+models = {
+    # LLaMA 3.1
+    #"llama3.1-8b": "meta-llama/Llama-3.1-8B",
+    #"llama3.1-8b-inst": "meta-llama/Llama-3.1-8B-Instruct",
+    
+    # Meta-LLaMA 3 (alt naming from Meta)
+    "meta-llama3-8b": "meta-llama/Meta-Llama-3-8B" 
+    #"meta-llama3-8b-inst": "meta-llama/Meta-Llama-3-8B-Instruct",
+    
+    # LLaMA 3.2
+    #"llama3.2-3b": "meta-llama/Llama-3.2-3B",
+    #"llama3.2-3b-inst": "meta-llama/Llama-3.2-3B-Instruct"
+
+    # LLaMA 2
+    #"llama2-7b": "meta-llama/Llama-2-7b-hf",
+    #"llama2-7b-chat": "meta-llama/Llama-2-7b-chat-hf",
+    
+    # Mistral
+    #"mistral-7b-inst": "mistralai/Mistral-7B-Instruct-v0.1",
+    
+    # Gemma
+    #"gemma-7b": "google/gemma-7b",
+    #"gemma-7b-it": "google/gemma-7b-it",
+
+    
+    # Qwen
+    #"qwen2.5-7b": "Qwen/Qwen2.5-7B"
+    #"qwen2.5-7b-inst": "Qwen/Qwen2.5-7B-Instruct"
+}
+
+# List of datasets
+datasets = {
+    #"FullData": "TrainDataAllYears/Ful_DatasetAllYears.csv",
+    #"FullDataSameLabelObj": "TrainDataAllYears/FullDataAndObjectives.csv",
+    "1FullDataSameObjNoNeutral": "TrainDataAllYears/FullDataAndObjectivesNoNeutral.csv", 
+    #"A_NoAllSameLabel": "TrainDataAllYears/Ful_DatasetAllYearsNoAllAgreeDesa.csv"
+    #"A_AllSameLabelSys": "TrainDataAllYears/Ful_DatasetAllYears.csv",
+    #"A_NoAllSameLabel": "TrainDataAllYears/Ful_DatasetAllYearsNoAllAgreeDesa.csv"
+    #"RollCall": "TrainDataAllYears/SplitBySource/RollCall.csv",
+    #"Vparty":"TrainDataAllYears/SplitBySource/V-party.csv",
+    #"Manifiesto":"TrainDataAllYears/SplitBySource/Manifiesto.csv",
+    #"RollCall_Vparty":"TrainDataAllYears/SourcePairs/RollCall_AND_V-party.csv",
+    #"Manifiesto_Vparty":"TrainDataAllYears/SourcePairs/Manifiesto_AND_V-party.csv",
+    #"Manifiesto_RollCall":"TrainDataAllYears/SourcePairs/Manifiesto_AND_RollCall.csv",
+}
+
+# Iteration
+for model_short, MODEL_NAME in models.items():
+    for dataset_short, CSV_PATH in datasets.items():
+        print(f"Running with model: {model_short} ({MODEL_NAME})")
+        print(f"Using dataset: {dataset_short} ({CSV_PATH})")
+
+        # ========== Data Preparation ==========
+        print("Loading dataset...")
+        df = pd.read_csv(CSV_PATH)
+
+        df["prompt"] = df.apply(
+            lambda row: f"Statement: {row['Statement']}\nParty's {'score' if row['Source'] == 'V-party' else 'stance'}: {row['Label'].lower()}",
+            axis=1
+        )
+
+        parties = df["Party"].unique().tolist()
+
+        # ================= Model Loading ==========
+        print(f"Loading model: {MODEL_NAME}")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME,
+            resume_download=True,
+            output_hidden_states=True,
+            torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32
+        ).to(DEVICE).eval()
+
+        num_layers = model.config.num_hidden_layers
+        layer_range = range(int(0.6 * num_layers), int(0.9 * num_layers))
+
+        print("Extracting features...")
+        X_all = extract_residuals(df["prompt"].tolist(), model, layer_range).mean(dim=1)  # [num_samples, dim]
+        #X_all = extract_residuals(df["prompt"].tolist()).reshape(len(df), -1)
+
+        probes = {}
+
+        # ========== Output Top Vectors ==========
+        sp = 'NoSys'
+        output_dir = f"top_val_vec_{model_short}_{dataset_short}{sp}"
+        os.makedirs(output_dir, exist_ok=True)
+
+        for party in parties:
+            print(f"Training probe for party: {party}")
+            y_party = (df["Party"] == party).astype(int).values
+        
+            # With evaluation
+            X_train, X_val, y_train, y_val = train_test_split( X_all, y_party, test_size=0.1, random_state=42, stratify=y_party)
+            y_tensor_train = torch.tensor(y_train)
+            y_tensor_val = torch.tensor(y_val)
+            probe = train_probe(X_train, y_tensor_train)
+            evaluate_probe(probe, torch.tensor(X_val), y_tensor_val, party, output_dir)
+            probes[party] = probe
+
+            # With not evaluation 
+            # y_tensor = torch.tensor(y_party)
+            # probe = train_probe(X_all, y_tensor)
+            # probes[party] = probe
+
+
+        print("Extracting and saving value vectors...")
+        for party, probe in probes.items():
+            print(f"\nTop aligned value vectors for party '{party}':")
+            top_vecs = get_top_value_vectors(probe, num_layers,model)
+            
+            # Print summary
+            for entry in top_vecs:
+                print(f"Layer {entry['layer']}, Neuron {entry['neuron_index']}, Cosine similarity: {entry['cosine_similarity']:.4f}")
+            
+            # Save
+            save_path = os.path.join(output_dir, f"{party}_top_value_vectors.pt")
+            torch.save(top_vecs, save_path)
+            print(f"Saved top vectors for '{party}' to {save_path}")
