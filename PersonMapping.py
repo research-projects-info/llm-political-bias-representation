@@ -15,43 +15,17 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ========== Residual Stream Extraction and Compute the person scaling matrinx ==========
 
-# Compute the prompt and extract the rresiduals without system prompt
-# def extract_residuals_person(prompts, model, layer_range):
-#     all_reps = []
-#     for prompt in tqdm(prompts, desc="Extracting residuals"):
-#         inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
-#         with torch.no_grad():
-#             outputs = model(**inputs)
-#         hidden_states = outputs.hidden_states
-#         reps = [hidden_states[l][0].mean(dim=0).float().cpu() for l in layer_range]
-#         all_reps.append(torch.stack(reps))  # [num_selected_layers, dim]
-#     return torch.stack(all_reps)  # [num_samples, num_layers_selected, dim]
-
-
-#Using  system prompt
 def extract_residuals_person(prompts, model, layer_range):
-    system_prompt = (
-        "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n"
-        "You are a neutral assistant that predicts voting behavior and you do not express your personal opinions or political preferences.\n"
-        "<|eot_id|>"
-    )
-
     all_reps = []
-    for user_prompt in tqdm(prompts, desc="Extracting residuals"):
-        full_prompt = (
-            f"{system_prompt}"
-            f"<|start_header_id|>user<|end_header_id|>\n{user_prompt}\n<|eot_id|>"
-            f"<|start_header_id|>assistant<|end_header_id|>\n"
-        )
-        inputs = tokenizer(full_prompt, return_tensors="pt").to(DEVICE)
+    for prompt in tqdm(prompts, desc="Extracting residuals"):
+        inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
         with torch.no_grad():
             outputs = model(**inputs)
         hidden_states = outputs.hidden_states
         reps = [hidden_states[l][0].mean(dim=0).float().cpu() for l in layer_range]
-        all_reps.append(torch.stack(reps))  # [num_selected_layers, dim]
-    return torch.stack(all_reps)  # [num_samples, num_layers_selected, dim]
+        all_reps.append(torch.stack(reps))  
+    return torch.stack(all_reps)  
 
-#Mapping between personas and the identified party-related value vectors (from Probe)
 def compute_persona_scaling_matrix(persona_residuals, top_value_vectors_by_party, layer_range):
     """
     Returns:
@@ -78,8 +52,6 @@ def compute_persona_scaling_matrix(persona_residuals, top_value_vectors_by_party
                 m_li = torch.dot(persona[persona_layer_index].float(), v_li.float())
 
                 cos_theta = vec_info["cosine_similarity"]
-                #m_li = torch.dot(persona[l], v_li)  # scalar
-                #m_li = torch.dot(persona[l].float(), v_li.float())
                 numerator += m_li.item() * cos_theta
                 denominator += abs(cos_theta)
 
@@ -98,9 +70,8 @@ def compute_persona_scaling_matrix(persona_residuals, top_value_vectors_by_party
 
 # ========== Configuration ==========
 
-CSV_PATH_Profile = "CartesianProduct_SynteticData_2.csv"  
-#CSV_PATH_Profile = "AustraliaVoting2022_15_06.csv"  
-# List of models
+CSV_PATH_Profile = "DataSurveyProfiles/CartesianProduct_SynteticData_2.csv"  
+#CSV_PATH_Profile = "ADataSurveyProfiles/ustraliaVoting2022_15_06.csv"  
 models = {
     # LLaMA 3.1
     "llama3.1-8b": "meta-llama/Llama-3.1-8B",
@@ -133,9 +104,7 @@ models = {
 
 # List of datasets
 datasets = {
-    #"A_AllSameLabel": "TrainDataAllYears/Ful_DatasetAllYears.csv",
-    #"A_NoAllSameLabel": "TrainDataAllYears/Ful_DatasetAllYearsNoAllAgreeDesa.csv"
-    "A_AllSameLabelSys": "TrainDataAllYears/Ful_DatasetAllYears.csv",
+    "A_AllSameLabel": "TrainDataAllYears/Ful_DatasetAllYears.csv",
 }
 
 # Iteration
@@ -147,109 +116,36 @@ for model_short, MODEL_NAME in models.items():
         # ========== Data Preparation  ==========
         print("Loading dataset...")
         df = pd.read_csv(CSV_PATH_Profile, keep_default_na=False)
-        #df["prompt"] = df.apply(lambda row: f"Statement: {row['Statement']}\nOpinion: {row['Label']}", axis=1)
-
-        ##Create a function for the different prompt
-        # Note: By the person matrix looks like the "where each attribute is equally important."
-        #Does not influence the output
-
-        #Use reduce features, change the prompt structure
-
-        # prompt_feature = ['AGE', "GENDER", "EDUCATION","STATE", "EMPLOYMENT", "POLITICAL_POSITION", "LOCATION_TYPE", "INCOME", "CITIZEN"]
-
-        # def createPrompt (): 
-        #     # minimal features: Age, Gender, Education, state
-        #     # Then all combination with the other features to check the impact of adding features
-        #     # Basic features: Age, gender, education, state
-        #     # label the scaling matrix with: 1) prompt basic features, 2) basic + te short id of the other features 
-        #     # Eployement -> e
-        #     # Political Position -> p
-        #     # Location Type -> l
-        #     # income -> i
-        #     # State -> s
-        #     # Citizen: c
-
-        #     return ""
-
-        #Check to add the instruction to the model, check in the previous experiment
-
-        ###===== PROMPT 1 =====
-        # df["prompt"] = df.apply(
-        #     lambda row: (
-        #         f"Consider the person below, where each attribute is equally important. "
-        #         f"If the elections were held in 2022, which party would this person vote for? "
-        #         f"This person votes for the party…:\n"
-        #         f"Age: {row['AGE']}\n"
-        #         f"Gender: {row['GENDER']}\n"
-        #         f"Education: {row['EDUCATION']}\n"
-        #         f"State: {row['STATE']}.\n"
-        #         f"Income: {row['INCOME']}\n"
-        #         f"Employement: {row['EMPLOYMENT']}\n"
-        #         f"Ideologically: {row['POLITICAL_POSITION']}\n"
-        #         f"Residential Area: Lives in {row['LOCATION_TYPE']}.\n"
-        #         f"Citizenship: Lives in {row['CITIZEN']}."
-        #     ),
-        #     axis=1
-        # )
-        # variant = "AES_position_sys_1"
-
-        ###===== ADD AUSTRALIA TO THE PROMPT THE SAME AS IN THE CLASSIFIER =====
-
-        # df["prompt"] = df.apply(
-        #     lambda row: (
-        #         f"Consider the person below, where each attribute is equally important. "
-        #         f"If the elections were held in 2022 in Australia, which party would this person vote for? "
-        #         f"This person votes for the party…:\n"
-        #         f"Age: {row['Age_binned_1_label']}\n"
-        #         f"Gender: {row['GENDER']}\n"
-        #         f"Education: {row['EDUCATION']}\n"
-        #         f"Income: {row['INCOME_CODED']}\n"
-        #         f"Employement: {row['EMPLOYMENT_CODED']}\n"
-        #         #f"Income: {row['INCOME']} per month\n"
-        #         f"Ideologically: {row['POLITICAL_POSITION_CODED']}\n"
-        #         f"State: {row['STATE']}.\n"
-        #         #f"Residential Area: Lives in {row['LOCATION_TYPE']}.\n"
-        #         #f"Citizenship: Lives in {row['CITIZEN']}."
-        #     ),
-        #     axis=1
-        # )
-        # variant = "Full_PandPersonSys_2"
-
-        # df["prompt"] = df.apply(
-        #     lambda row: (
-        #         f"Consider the person below, where each attribute is equally important. "
-        #         f"If the elections were held in 2022, which party would this person vote for? "
-        #         f"This person votes for the party…:\n"
-        #         f"Age: {row['Age_binned_1_label']}\n"
-        #         f"Gender: {row['GENDER']}\n"
-        #         f"Education: {row['EDUCATION']}\n"
-        #         f"Income: {row['INCOME_CODED']}\n"
-        #         f"Employment: {row['EMPLOYMENT_CODED']}\n"
-        #         #f"Income: {row['INCOME']} per month\n"
-        #         f"Ideologically: {row['POLITICAL_POSITION_CODED']}\n"
-        #         f"State: {row['STATE']}.\n"
-        #         #f"Residential Area: Lives in {row['LOCATION_TYPE']}.\n"
-        #         #f"Citizenship: Lives in {row['CITIZEN']}."
-        #     ),
-        #     axis=1
-        # )
-        # #variant = 1
-        # variant = "Full_Sys_v1"
 
         df["prompt"] = df.apply(
             lambda row: (
-                f"I am {row['Age_binned_1_label']} and {row['GENDER'].lower()}. "
-                f"I have {row['EDUCATION'].lower()}, a {row['INCOME_CODED']} income, "
-                f"and my employment situation is {row['EMPLOYMENT_CODED'].lower()}. "
-                f"Ideologically, I lean towards the position {row['POLITICAL_POSITION_CODED'].lower()}. "
-                f"I live in {row['STATE']}. "
-                f"If the elections were held in 2022 in Australia, which party would I vote for? "
-                f"I vote for the party..."
+                f"Consider the person below, where each attribute is equally important. "
+                f"If the elections were held in 2022, which party would this person vote for? "
+                f"This person votes for the party…:\n"
+                f"Age: {row['Age_binned_1_label']}\n"
+                f"Gender: {row['GENDER']}\n"
+                f"Education: {row['EDUCATION']}\n"
+                f"Income: {row['INCOME_CODED']}\n"
+                f"Employment: {row['EMPLOYMENT_CODED']}\n"
+                f"Ideologically: {row['POLITICAL_POSITION_CODED']}\n"
+                f"State: {row['STATE']}.\n"
             ),
             axis=1
         )
+        variant = 1
+        # df["prompt"] = df.apply(
+        #     lambda row: (
+        #         f"I am {row['Age_binned_1_label']} and {row['GENDER'].lower()}. "
+        #         f"I have {row['EDUCATION'].lower()}, a {row['INCOME_CODED']} income, "
+        #         f"and my employment situation is {row['EMPLOYMENT_CODED'].lower()}. "
+        #         f"Ideologically, I lean towards the position {row['POLITICAL_POSITION_CODED'].lower()}. "
+        #         f"I live in {row['STATE']}. "
+        #         f"If the elections were held in 2022 in Australia, which party would I vote for? "
+        #         f"I vote for the party..."
+        #     ),
+        #     axis=1
+        # )
         # variant = 3
-        variant = "Full_PandPersonSys_3"
 
         # ========== Model Loading ==========
         print(f"Loading model: {MODEL_NAME}")
@@ -289,7 +185,7 @@ for model_short, MODEL_NAME in models.items():
         scaling_data = []
         for entry in scaling_matrix:
             row = {"persona_id": entry["persona_id"]}
-            row.update(entry["scaling"])  # Add each party's m_pn score
+            row.update(entry["scaling"])  
             scaling_data.append(row)
         scaling_df = pd.DataFrame(scaling_data)
         scaling_df.to_csv(f"{output_dir}/scaling_matrix_{variant}.csv", index=False)

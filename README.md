@@ -1,9 +1,11 @@
-# LLMExperiments
-From reference paper:
-- 📄 Paper: [https://arxiv.org/abs/2502.16280](https://arxiv.org/abs/2502.16280)
+# Whose Politics Do LLMs Represent? Uncovering Political Bias in LLMs’ Latent Space
 
-For  "4.2 Constructing a probe for identifying party-related MLP value vectors" use [ProbeClassifier.py](./ProbeClassifier.py) script.
+## Files
 
-For "4.3 Analyzing the mapping between personas and the identified party-related value vectors" execute [PersonMapping.py](./PersonMapping.py) script. This uses de output of 4.2.
-
-To submit a batch task to the cluster, use the [run_job_probe.sh](./run_job_probe.sh) script.
+- `./ProbeClassifier.py`: Code to replicate the results of probe for identifying party related Vectors in MLP.
+- `./PersonMapping.py`: Code to replicate the results of mapping between personas and the identified party-related
+value vectors.
+- `./replicate_figures.ipynb`: Code to replicate the figures. 
+- `./DataSurveyProfiles/`: Data for persona profile can be downloaded from (https://drive.google.com/drive/folders/15OTOHDBUDMQSQWssx1JwtAee4incKtn1?usp=sharing "here")
+- `./TrainDataAllYears/`: Data for persona profile can be downloaded from (https://drive.google.com/drive/folders/1Kele-T-Xc4mB58-ANB2i7xYVxuFItK50?usp=drive_link "here")
+- `./results_replication/`: Results to replicate the figures can be downloaded from (https://drive.google.com/drive/folders/1ndi3jOqbHJZl5j3uHjOCusQfRE0IRlUZ?usp=drive_link "here")
