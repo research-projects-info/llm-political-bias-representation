@@ -67,3 +67,18 @@ value vectors.
 |  | mistral-7b-inst | 0.408 | 0.254 | 0.224 | 0.643 | 0.333 |
 |  | qwen2.5-7b | 0.449 | 0.253 | 0.222 | 0.559 | 0.318 |
 |  | qwen2.5-7b-inst | 0.448 | 0.252 | 0.223 | 0.563 | 0.319 |
+
+## Data Sources and Labeling Procedure for Probing Data Training
+
+### (V-Party) dataset
+
+For Varieties of Party Identity and Organization (V Party) Dataset, labels were generated from the coded survey responses in the dataset and the accompanying V-Party Codebook. For binary questions, responses coded as “Yes” were labeled “Agree,” while responses coded as “No” were labeled “Disagree.” For questions with multiple response options, the question text and the selected answer were combined to form a declarative statement representing the party’s position. These statements were labeled “Agree,” since they reflect a characteristic attributed to the party by the expert coders. The codebook was used to retrieve the exact question wording and the meaning of each response option, ensuring that the generated statement accurately reflected the coded variable. After constructing each statement, minor textual normalization was applied: the word “Australia” was inserted where relevant to provide geographical context.
+
+### Manifesto Project dataset
+
+Data from the Manifesto Project Dataset contain coded categories representing positive and negative references to policy themes within party manifestos. For labeling, the positive and negative scores associated with each category were combined into a single value. If the resulting value was greater than zero, the statement was labeled “Agree.” If the value was less than zero, it was labeled “Disagree.” A value equal to zero was treated as Neutral. This procedure converts the directional coding of manifesto statements into a standardized agreement label compatible with the other data sources.
+
+
+### Roll-call votes (division records; party-level labels)
+
+We use the Parliamentary Handbook of the Commonwealth of Australia API to obtain Roll-call vote data. This were obtained from parliamentary division records, where each division represents a formal recorded vote on a specific motion or bill. These records report the vote of each individual member of parliament (MP), voted “Ayes” or “Noes.”, each record already contains a party identifier (Party). Motion or bill were considered as statements and labeled as follows: Result = 0 (Ayes) was labeled “Agree” and Result = 1 (Noes) was labeled “Disagree.”
