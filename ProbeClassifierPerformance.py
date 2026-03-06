@@ -10,6 +10,8 @@ import json
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import brier_score_loss, accuracy_score
 from sklearn.metrics import accuracy_score, brier_score_loss, precision_score, recall_score, f1_score, confusion_matrix
+from scipy.stats import spearmanr
+import numpy as np
 
 #import matplotlib.pyplot as plt
 
@@ -35,35 +37,39 @@ def extract_residuals(prompts, model, layer_range):
     return torch.stack(all_reps)  # [num_samples, num_layers_selected, dim]
 
 #=========================== Evaluate the Classifier performance===============
-def evaluate_probe(probe, X_val, y_val, party, output_dir, bins=10):
+
+
+def evaluate_probe(probe, X_val, y_val, party, output_dir):
     probe.eval()
     with torch.no_grad():
         logits = probe(X_val.to(DEVICE)).cpu()
-        probs = torch.sigmoid(logits)
-        labels = y_val.cpu()
+        probs = torch.sigmoid(logits).numpy().astype(float)
+        labels = y_val.cpu().numpy().astype(int)
 
-    # Predictions
-    preds = (probs > 0.5).int()
+    preds = (probs > 0.5).astype(int)
 
-    # Metrics
+    # Standard metrics
     acc = accuracy_score(labels, preds)
     brier = float(brier_score_loss(labels, probs))
     precision = precision_score(labels, preds, zero_division=0)
     recall = recall_score(labels, preds, zero_division=0)
     f1 = f1_score(labels, preds, zero_division=0)
-    cm = confusion_matrix(labels, preds).tolist() 
+    cm = confusion_matrix(labels, preds).tolist()
 
-    # Print metrics
+    # ✅ Spearman rank correlation
+    # (labels are binary; Spearman is still valid as a rank-biserial style signal)
+    rho, pval = spearmanr(probs, labels)
+
     print(f"Evaluation for {party}:")
     print(f"Accuracy     : {acc:.3f}")
     print(f"Brier Score  : {brier:.3f}")
     print(f"Precision    : {precision:.3f}")
     print(f"Recall       : {recall:.3f}")
     print(f"F1-Score     : {f1:.3f}")
+    print(f"Spearman rho : {rho:.3f} (p={pval:.2e})")
     print("\nConfusion Matrix:")
     print(cm)
 
-    # Save to file
     os.makedirs(output_dir, exist_ok=True)
     metrics_path = os.path.join(output_dir, f"metrics_{party}.json")
 
@@ -74,7 +80,13 @@ def evaluate_probe(probe, X_val, y_val, party, output_dir, bins=10):
         "precision": precision,
         "recall": recall,
         "f1_score": f1,
-        "confusion_matrix": cm
+        "spearman_rho_probs_vs_label": float(rho) if rho is not None else None,
+        "spearman_pval": float(pval) if pval is not None else None,
+        "confusion_matrix": cm,
+        # optional: save distributions
+        "val_pos_rate": float(labels.mean()),
+        "val_prob_mean": float(probs.mean()),
+        "val_prob_std": float(probs.std()),
     }
 
     with open(metrics_path, "w") as f:
@@ -205,8 +217,13 @@ for model_short, MODEL_NAME in models.items():
         print("Loading dataset...")
         df = pd.read_csv(CSV_PATH)
 
+        # Keep only statements/opinions with Year <= 2023 (ignore 2024+)
+        df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
+        df = df[df["Year"].notna() & (df["Year"] <= 2023)].reset_index(drop=True)
+
         df["prompt"] = df.apply(
-            lambda row: f"Statement: {row['Statement']}\nParty's {'score' if row['Source'] == 'V-party' else 'stance'}: {row['Label'].lower()}",
+          #  lambda row: f"Statement: {row['Statement']}\nParty's {'score' if row['Source'] == 'V-party' else 'stance'}: {row['Label'].lower()}",
+            lambda row: f"Statement: {row['Statement']}\n{'Label'}: {row['Label'].lower()}",
             axis=1
         )
 
@@ -231,8 +248,8 @@ for model_short, MODEL_NAME in models.items():
         probes = {}
 
         # ========== Output Top Vectors ==========
-        sp = 'Sys'
-        output_dir = f"top_val_vec_{model_short}_{dataset_short}{sp}"
+        sp = 'NoSys'
+        output_dir = f"top_val_vec_{model_short}_{dataset_short}{sp}/evaluation_p"
         os.makedirs(output_dir, exist_ok=True)
 
         for party in parties:
@@ -245,19 +262,19 @@ for model_short, MODEL_NAME in models.items():
             y_tensor_val = torch.tensor(y_val)
             probe = train_probe(X_train, y_tensor_train)
             evaluate_probe(probe, torch.tensor(X_val), y_tensor_val, party, output_dir)
-            probes[party] = probe
+            #probes[party] = probe
 
 
-        print("Extracting and saving value vectors...")
-        for party, probe in probes.items():
-            print(f"\nTop aligned value vectors for party '{party}':")
-            top_vecs = get_top_value_vectors(probe, num_layers,model)
+        # print("Extracting and saving value vectors...")
+        # for party, probe in probes.items():
+        #     print(f"\nTop aligned value vectors for party '{party}':")
+        #     top_vecs = get_top_value_vectors(probe, num_layers,model)
             
-            # Print summary
-            for entry in top_vecs:
-                print(f"Layer {entry['layer']}, Neuron {entry['neuron_index']}, Cosine similarity: {entry['cosine_similarity']:.4f}")
+        #     # Print summary
+        #     for entry in top_vecs:
+        #         print(f"Layer {entry['layer']}, Neuron {entry['neuron_index']}, Cosine similarity: {entry['cosine_similarity']:.4f}")
             
-            # Save
-            save_path = os.path.join(output_dir, f"{party}_top_value_vectors.pt")
-            torch.save(top_vecs, save_path)
-            print(f"Saved top vectors for '{party}' to {save_path}")
+        #     # Save
+        #     save_path = os.path.join(output_dir, f"{party}_top_value_vectors.pt")
+        #     torch.save(top_vecs, save_path)
+        #     print(f"Saved top vectors for '{party}' to {save_path}")
